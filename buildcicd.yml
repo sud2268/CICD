@@ -1,0 +1,125 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature
+
+pr:
+  branches:
+    include:
+      - main
+      - feature
+
+variables:
+  - name: TF_VAR_environment
+    value: "dev" 
+  - name: ARM_CLIENT_ID
+    value: "$(servicePrincipalClientId)"
+  - name: ARM_CLIENT_SECRET
+    value: "$(servicePrincipalClientSecret)"
+  - name: ARM_TENANT_ID
+    value: "$(tenantId)"
+  - name: ARM_SUBSCRIPTION_ID
+    value: "$(subscriptionId)"
+  - name: SECURE_VAULT_URI
+    value: "$(azureKeyVaultURI)" 
+
+stages:
+  - stage: Plan
+    displayName: "Terraform Plan"
+    jobs:
+      - job: Plan
+        displayName: "Generate Execution Plan"
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Install Terraform and required tools
+          - script: |
+              curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
+              apt-get update && apt-get install terraform -y
+            displayName: "Install Terraform"
+
+          # Terraform Initialize
+          - script: terraform init
+            displayName: "Initialize Terraform"
+
+          # Terraform Plan
+          - script: terraform plan -out=tfplan
+            displayName: "Generate Execution Plan"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  - stage: Validate
+    displayName: "Validate Terraform Code"
+    dependsOn: Plan
+    condition: succeeded()
+    jobs:
+      - job: Validate
+        displayName: "Run Syntax and Security Checks"
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Run Terraform formatting and syntax checks
+          - script: terraform fmt -check
+            displayName: "Check Terraform Code Format"
+
+          - script: tflint
+            displayName: "Run TFLint for Terraform Code Quality"
+
+          # Security Checks (truffleHog, git-secrets)
+          - script: |
+              pip install truffleHog
+              truffleHog filesystem .
+            displayName: "Run TruffleHog for Secrets Detection"
+
+          - script: git secrets --scan
+            displayName: "Run Git-Secrets for Security Scanning"
+
+  - stage: Deploy
+    displayName: "Deploy Infrastructure"
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: Deploy
+        displayName: "Apply Terraform Plan"
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Apply Terraform Plan
+          - script: terraform apply -auto-approve tfplan
+            displayName: "Deploy Infrastructure"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  - stage: Rollback
+    displayName: "Rollback/Destroy Resources"
+    condition: failed()
+    jobs:
+      - job: Rollback
+        displayName: "Destroy Resources"
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Rollback/Destroy Resources
+          - script: terraform destroy -auto-approve
+            displayName: "Destroy Resources"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
